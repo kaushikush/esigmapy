@@ -364,7 +364,7 @@ def apply_taper(
     elif window == "planck":
         try:
             planck_window = Planck_window_LAL(
-                data, "LAL_SIM_INSPIRAL_TAPER_START", num_extrema_start=taper_width
+                data, "LAL_SIM_INSPIRAL_TAPER_START", num_extrema_start=2
             )
             tapered_data = data * planck_window
              
