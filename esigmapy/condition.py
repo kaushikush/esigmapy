@@ -30,14 +30,14 @@ def _extract_waveform_info(waveform, delta_t=None):
     """
     info = {'is_timeseries': False}
     
-    if isinstance(waveform, np.ndarray): # this assumes that the input is a numpy array
+    if isinstance(waveform, np.ndarray): # this checks that the input is a numpy array
         if delta_t is None:
             raise ValueError("delta_t must be provided when waveform is a numpy array.")
         info['data'] = waveform
         info['delta_t'] = delta_t
         info['is_timeseries'] = False
     else:
-        # This assumes that the input is a PyCBC TimeSeries
+        # This checks that the input is a PyCBC TimeSeries
         if not hasattr(waveform, 'delta_t') or not hasattr(waveform, 'data'):
             raise TypeError("Input must be either np.ndarray or PyCBC TimeSeries with 'delta_t' and 'data' attributes.")
         info['data'] = waveform.data
@@ -182,14 +182,16 @@ def compute_taper_width(waveform, method="cycles", fixed_duration=0.3, n_cycles=
     n_cycles : int
         Number of cycles for 'cycles' method (default: 1)
     f_lower : float
-        Lowest frequency supported (Hz). Used to calculate max samples for one cycle (default: 1.0)
+        Lowest frequency supported (Hz). Used to calculate max samples for one
+        cycle (default: 1.0)
     delta_t : float or None
-        Time step. Required for numpy array input. Automatically extracted for TimeSeries.
+        Time step in seconds. Required for numpy array input. Automatically
+        extracted for TimeSeries.
 
     Returns:
     --------
-    float : Taper width in seconds
-    
+    int : Taper width in samples
+
     Raises:
     -------
     ValueError : If delta_t is not provided for numpy array or if method is invalid
@@ -224,22 +226,25 @@ def compute_taper_width(waveform, method="cycles", fixed_duration=0.3, n_cycles=
 
         if len(extrema) >= n_extrema_needed:
             # Calculate taper width in indices, then convert to time
-            taper_width_idx = extrema[n_extrema_needed - 1] - extrema[0]
-            taper_width = taper_width_idx * delta_t
+            taper_width = int(extrema[n_extrema_needed - 1] - extrema[0])
+            #taper_width = taper_width_idx * delta_t
         else:
             # Fallback to fixed time
-            if len(extrema) < n_extrema_needed:
-                import warnings
-                warnings.warn(
-                    f"Not enough extrema found ({len(extrema)} < {n_extrema_needed}). "
-                    f"Falling back to fixed_duration={fixed_duration}s"
-                )
-            taper_width = fixed_duration
+            import warnings
+            warnings.warn(
+                f"Not enough extrema found ({len(extrema)} < {n_extrema_needed}). "
+                f"Falling back to fixed_duration={fixed_duration}s"
+            )
+            taper_width = int(fixed_duration / delta_t)
 
     elif method == "fixed_time":
         # Use fixed duration, ensure it doesn't exceed 10% of waveform
-        taper_width_idx = int(len(data) * 0.1)  # 10% of waveform
-        taper_width = min(fixed_duration, taper_width_idx * delta_t)
+        # taper_width_idx = int(len(data) * 0.1)  # 10% of waveform
+        # taper_width = min(fixed_duration, taper_width_idx * delta_t)
+
+        # Cap at 10% of the waveform length; take the smaller of that and
+        # the user-specified fixed_duration (both expressed in samples)
+        taper_width = min(int(fixed_duration / delta_t), int(len(data) * 0.1))
 
     else:
         raise ValueError(f"Unknown method: '{method}'. Use 'cycles' or 'fixed_time'")
@@ -256,6 +261,7 @@ def apply_taper(
     n_cycles=1,
     f_lower=1.0,
     window="kaiser",
+    delta_t=None,
     verbose=False,
 ):
     """
@@ -279,7 +285,9 @@ def apply_taper(
         Lowest frequency supported (Hz). Used to calculate taper width for 'cycles' method (default: 1.0)
     window : str
         Window function to use: 'kaiser' (Kaiser window) or 'planck' (LAL Planck window)
-        (default: 'kaiser')
+        (default: 'planck')
+    delta_t : float or None
+        Time step. Required if waveform is a numpy array. Automatically extracted if waveform is a TimeSeries.
     verbose : bool
         Verbosity flag (default: False)
 
@@ -314,13 +322,20 @@ def apply_taper(
                 n_cycles=n_cycles, f_lower=f_lower, delta_t=delta_t
             )
             if verbose:
-                print(f"Auto-computed taper width: {taper_width:.6f} s (method: {method}, window: {window})")
+                print(
+                    f"Auto-computed taper width: {taper_width} samples"
+                    f"({taper_width * delta_t:.6f} s) "
+                    f"(method: {method}, window: {window})"
+                )
+                #print(f"Auto-computed taper width: {taper_width:.6f} s (method: {method}, window: {window})")
         except Exception as e:
             raise ValueError(f"Failed to compute taper width: {str(e)}")
-    
-    taper_width_idx = int(taper_width / delta_t)
-    if taper_width_idx < 1:
-        raise ValueError(f"Computed taper width ({taper_width:.6f} s) is less than one sample (delta_t={delta_t:.6f} s)")
+    #taper_width_idx = int(taper_width / delta_t)
+    if taper_width < 1:
+        raise ValueError(
+            f"Taper width ({taper_width} samples) must be at least 1 sample."
+        )
+        #raise ValueError(f"Computed taper width ({taper_width:.6f} s) is less than one sample (delta_t={delta_t:.6f} s)")
     
     if window == "kaiser":
         # Kaiser window method using PyCBC's td_taper - works for both numpy array and TimeSeries
@@ -328,34 +343,33 @@ def apply_taper(
             from pycbc.waveform.utils import td_taper
             import pycbc.types as pt
             
-            # Convert to TimeSeries if needed
+            # Convert to TimeSeries, td_taper requires TimeSeries input.
             if not is_timeseries:
                 temp_ts = pt.TimeSeries(data, delta_t=delta_t)
             else:
                 temp_ts = waveform
             
-            # Apply td_taper using PyCBC's Kaiser window implementation
             t_start = temp_ts.sample_times[0]
-            t_end_taper = t_start + taper_width
+            t_end_taper = t_start + (taper_width * delta_t) # samples → seconds for PyCBC
             tapered_ts = td_taper(temp_ts, t_start, t_end_taper, beta=beta, side="left")
             tapered_data = tapered_ts.data
             
             if verbose:
-                print(f"Applied kaiser window ({taper_width_idx} samples, beta={beta})")
+                print(f"Applied kaiser window ({taper_width} samples, beta={beta})")
         except ImportError as e:
             raise ImportError(f"PyCBC td_taper is required for kaiser window: {str(e)}")
         except Exception as e:
             raise RuntimeError(f"Error applying kaiser window: {str(e)}")
     
     elif window == "planck":
-        # LAL Planck window method - works for both numpy array and TimeSeries
         try:
-            planck_window = Planck_window_LAL(data, "LAL_SIM_INSPIRAL_TAPER_START", 
-                                             num_extrema_start=taper_width_idx)
+            planck_window = Planck_window_LAL(
+                data, "LAL_SIM_INSPIRAL_TAPER_START", num_extrema_start=taper_width
+            )
             tapered_data = data * planck_window
-            
+             
             if verbose:
-                print(f"Applied planck window ({taper_width_idx} extrema)")
+                print(f"Applied planck window ({taper_width} samples)")
         except Exception as e:
             raise RuntimeError(f"Error applying planck window: {str(e)}")
     
@@ -363,14 +377,24 @@ def apply_taper(
     if is_timeseries:
         try:
             import pycbc.types as pt
-            return pt.TimeSeries(tapered_data, delta_t=delta_t)
+            return pt.TimeSeries(tapered_data, delta_t=delta_t, epoch=waveform.start_time)
         except Exception as e:
             raise RuntimeError(f"Error creating output TimeSeries: {str(e)}")
     else:
         return tapered_data
 
 
-def apply_taper_both_pols(hp, hc, beta=8, method="cycles", n_cycles=1, f_lower=1.0, window="kaiser", verbose=False):
+def apply_taper_both_pols(
+    hp,
+    hc,
+    beta=8,
+    method="cycles",
+    n_cycles=1,
+    f_lower=1.0,
+    window="kaiser",
+    delta_t=None,
+    verbose=False,
+):
     """
     Apply consistent taper to both polarizations based on hp.
     
@@ -392,6 +416,8 @@ def apply_taper_both_pols(hp, hc, beta=8, method="cycles", n_cycles=1, f_lower=1
         Window function: 'kaiser' or 'planck' (default: 'kaiser')
     verbose : bool
         Verbosity flag (default: False)
+    delta_t : float
+        Sampling interval (default: None)
     -----------
     hp, hc : TimeSeries or np.ndarray
         The plus and cross polarizations to taper (must be same type)
@@ -425,12 +451,11 @@ def apply_taper_both_pols(hp, hc, beta=8, method="cycles", n_cycles=1, f_lower=1
     
     # Extract info from both
     try:
-        hp_info = _extract_waveform_info(hp)
-        hc_info = _extract_waveform_info(hc)
+        hp_info = _extract_waveform_info(hp, delta_t=delta_t)
+        hc_info = _extract_waveform_info(hc, delta_t=delta_t)
     except (ValueError, TypeError) as e:
         raise TypeError(f"Failed to extract polarization info: {str(e)}")
     
-    # Validate compatibility
     if hp_info['delta_t'] != hc_info['delta_t']:
         raise ValueError(f"hp and hc have different delta_t: {hp_info['delta_t']} vs {hc_info['delta_t']}")
     
@@ -443,7 +468,12 @@ def apply_taper_both_pols(hp, hc, beta=8, method="cycles", n_cycles=1, f_lower=1
             hp, method=method, n_cycles=n_cycles, f_lower=f_lower, delta_t=hp_info['delta_t']
         )
         if verbose:
-            print(f"Computed taper width from h+: {taper_width:.6f} s (method: {method}, n_cycles: {n_cycles})")
+            print(
+                f"Computed taper width from h+: {taper_width} samples "
+                f"({taper_width * hp_info['delta_t']:.6f} s) "
+                f"(method: {method}, n_cycles: {n_cycles})"
+            )
+            #print(f"Computed taper width from h+: {taper_width} samples (method: {method}, n_cycles: {n_cycles})")
     except Exception as e:
         raise ValueError(f"Failed to compute taper width: {str(e)}")
     
@@ -457,6 +487,7 @@ def apply_taper_both_pols(hp, hc, beta=8, method="cycles", n_cycles=1, f_lower=1
             n_cycles=n_cycles,
             f_lower=f_lower,
             window=window,
+            delta_t=hp_info['delta_t'],
             verbose=verbose,
         )
         hc_tapered = apply_taper(
@@ -467,6 +498,7 @@ def apply_taper_both_pols(hp, hc, beta=8, method="cycles", n_cycles=1, f_lower=1
             n_cycles=n_cycles,
             f_lower=f_lower,
             window=window,
+            delta_t=hc_info['delta_t'],
             verbose=verbose,
         )
     except Exception as e:
